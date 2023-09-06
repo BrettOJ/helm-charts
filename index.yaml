@@ -1,14 +1,25 @@
 apiVersion: v1
 entries:
+  default-helm-chart:
+  - apiVersion: v2
+    appVersion: 1.16.0
+    created: "2023-09-06T14:43:11.5467524+08:00"
+    description: A Helm chart for Kubernetes
+    digest: e718e2c44aa9f18a5a2734868a4531bc7275b5cbca0e2d247b3ee4148b1c9207
+    name: default-helm-chart
+    type: application
+    urls:
+    - https://brettoj.github.io/helm-charts/default-helm-chart-0.1.0.tgz
+    version: 0.1.0
   hc-apache-nifi:
   - apiVersion: v2
     appVersion: 1.16.0
-    created: "2023-09-06T11:24:52.659798+08:00"
+    created: "2023-09-06T14:43:11.5473857+08:00"
     description: A Helm chart for Kubernetes
-    digest: 673925c1a72842c72ebb06e8748c3583cbabb2c728d6ccc3991979e3a1e185a1
+    digest: f76c8fabd8286cd157216801f9ca37eae7e1cc52056017605d670be5891256a0
     name: hc-apache-nifi
     type: application
     urls:
-    - https://github.com/BrettOJ/helm-charts/hc-apache-nifi-0.1.0.tgz
+    - https://brettoj.github.io/helm-charts/hc-apache-nifi-0.1.0.tgz
     version: 0.1.0
-generated: "2023-09-06T11:24:52.6457209+08:00"
+generated: "2023-09-06T14:43:11.546051+08:00"
