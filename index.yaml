@@ -1,0 +1,14 @@
+apiVersion: v1
+entries:
+  hc-apache-nifi:
+  - apiVersion: v2
+    appVersion: 1.16.0
+    created: "2023-09-06T11:24:52.659798+08:00"
+    description: A Helm chart for Kubernetes
+    digest: 673925c1a72842c72ebb06e8748c3583cbabb2c728d6ccc3991979e3a1e185a1
+    name: hc-apache-nifi
+    type: application
+    urls:
+    - https://github.com/BrettOJ/helm-charts/hc-apache-nifi-0.1.0.tgz
+    version: 0.1.0
+generated: "2023-09-06T11:24:52.6457209+08:00"
