@@ -1,0 +1,24 @@
+apiVersion: v1
+entries:
+  nifi:
+  - apiVersion: v2
+    appVersion: 1.16.3
+    created: "2023-09-07T09:43:31.784685+08:00"
+    description: Apache NiFi is a software project from the Apache Software Foundation
+      designed to automate the flow of data between software systems.
+    digest: a6112845de68cee50a435ea83d181b3305e917d069b60136dcc3eb17f35e579f
+    home: https://nifi.apache.org/
+    icon: https://svn.apache.org/repos/asf/nifi/site/trunk/images/niFi-logo-horizontal-scaled.png
+    keywords:
+    - nifi
+    - data
+    - process
+    maintainers:
+    - email: BrettOJ@konjur.sg
+      name: BrettOJ
+      url: https://github.com/BrettOJ
+    name: nifi
+    urls:
+    - https://brettoj.github.io/helm-charts/nifi-1.1.5.tgz
+    version: 1.1.5
+generated: "2023-09-07T09:43:31.7824848+08:00"
