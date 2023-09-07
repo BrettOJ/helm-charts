@@ -3,10 +3,10 @@ entries:
   nifi:
   - apiVersion: v2
     appVersion: 1.16.3
-    created: "2023-09-07T08:54:33.2513147+08:00"
+    created: "2023-09-07T09:12:13.2799319+08:00"
     description: Apache NiFi is a software project from the Apache Software Foundation
       designed to automate the flow of data between software systems.
-    digest: 422574a510925d3ccb7c8343bfdb14105429b7334c9c543a0c1775ad5a333214
+    digest: c55701e560f71d201b74b1f162c1a485d845d8876fef2d1394fd9d7bac516ba3
     home: https://nifi.apache.org/
     icon: https://svn.apache.org/repos/asf/nifi/site/trunk/images/niFi-logo-horizontal-scaled.png
     keywords:
@@ -21,4 +21,4 @@ entries:
     urls:
     - https://brettoj.github.io/helm-charts/nifi-1.1.4.tgz
     version: 1.1.4
-generated: "2023-09-07T08:54:33.2482367+08:00"
+generated: "2023-09-07T09:12:13.2700387+08:00"
