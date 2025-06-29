@@ -1,0 +1,167 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  acrLoginServer: 'acrbojtest.azurecr.io'
+  acrServiceConnection: 'konjur-azure-container-registry-connection'
+
+stages:
+  - stage: PromoteImages
+    jobs:
+     - job: Promote
+       steps:
+        - checkout: self
+          persistCredentials: true
+          fetchDepth: 0
+
+        - task: DockerInstaller@0
+          inputs:
+            dockerVersion: '28.3.0'
+
+        - script: |
+            sudo wget https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz -O helm.tar.gz
+            tar -zxvf helm.tar.gz
+            sudo mv linux-amd64/helm /usr/local/bin/helm
+            helm version
+          displayName: 'Install Helm CLI'
+
+        - script: |
+            sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+            sudo chmod +x /usr/bin/yq
+          displayName: 'Install yq'
+
+        - task: Docker@2
+          displayName: 'Login to ACR'
+          inputs:
+            command: login
+            containerRegistry: $(acrServiceConnection)
+
+        - script: |
+                set -e
+
+                acrLoginServer="$(acrLoginServer)"
+
+                #Function to auto-detect image info
+                detect_image_info() {
+                  local values_file="$1"
+                  local repo tag full nested
+
+                  repo=$(yq '.image.repository' "$values_file")
+                  tag=$(yq '.image.tag' "$values_file")
+                  if [[ "$repo" != "null" && "$tag" != "null" && -n "$repo" && -n "$tag" ]]; then
+                    echo "format=split"
+                    echo "image=$repo:$tag"
+                    return 0
+                  fi
+
+                  full=$(yq '.image' "$values_file")
+                  if [[ "$full" != "null" && "$full" == *":"* ]]; then
+                    echo "format=full"
+                    echo "image=$full"
+                    return 0
+                  fi
+
+                  nested=$(yq '.containers[0].image' "$values_file")
+                  if [[ "$nested" != "null" && "$nested" == *":"* ]]; then
+                    echo "format=full"
+                    echo "image=$nested"
+                    return 0
+                  fi
+
+                  return 1
+                }
+
+                echo "Locating all chart folders in /charts"
+
+                # Get all chart folders that contain a values.yaml
+                CHART_DIRS=$(find . -maxdepth 2 -type f -name "values.yaml" -exec dirname {} \; | grep -vE '^\./\.|^\.$' | sort -u)
+
+
+                if [ -z "$CHART_DIRS" ]; then
+                  echo "No Helm chart folders with values.yaml found."
+                  exit 1
+                fi
+
+                echo "Found chart directories:"
+                echo "$CHART_DIRS"
+
+                for dir in $CHART_DIRS; do
+                  echo "Processing chart: $dir"
+
+                  VALUES_FILE="$dir/values.yaml"
+                  if [ ! -f "$VALUES_FILE" ]; then
+                    echo "No values.yaml found — skipping"
+                    continue
+                  fi
+
+                  eval $(detect_image_info "$VALUES_FILE" || echo "format=unknown image=")
+
+                  if [ "$format" = "unknown" ] || [ -z "$image" ]; then
+                    echo "No valid image found in $VALUES_FILE — skipping"
+                    continue
+                  fi
+
+                  REPO_NAME=$(basename $(echo "$image" | cut -d: -f1))
+                  TAG=$(echo "$image" | cut -d: -f2)
+                  ACR_IMAGE="$acrLoginServer/$REPO_NAME:$TAG"
+
+                  echo "Pulling image: $image"
+                  docker pull "$image"
+
+                  echo "Tagging as: $ACR_IMAGE"
+                  docker tag "$image" "$ACR_IMAGE"
+
+                  echo "Pushing to ACR"
+                  docker push "$ACR_IMAGE"
+                done
+          displayName: 'Find and Promote All Helm Chart Images'
+        - script: |
+            set -e
+            export HELM_EXPERIMENTAL_OCI=1
+            acrLoginServer="$(acrLoginServer)"
+
+            echo "📦 Locating Helm charts in root folders..."
+
+            CHART_DIRS=$(find . -maxdepth 2 -type f -name "Chart.yaml" -exec dirname {} \; | grep -vE '^\./\.|^\.$' | sort -u)
+
+            if [ -z "$CHART_DIRS" ]; then
+              echo "⚠️ No chart folders with Chart.yaml found — skipping helm push"
+              exit 0
+            fi
+
+            for dir in $CHART_DIRS; do
+              CHART_FILE="$dir/Chart.yaml"
+              if [ ! -f "$CHART_FILE" ]; then
+                echo "⚠️  No Chart.yaml found — skipping $dir"
+                continue
+              fi
+
+              CHART_NAME=$(yq '.name' "$CHART_FILE")
+              CHART_VERSION=$(yq '.version' "$CHART_FILE")
+
+              if [[ -z "$CHART_NAME" || "$CHART_NAME" == "null" || -z "$CHART_VERSION" || "$CHART_VERSION" == "null" ]]; then
+                echo "⚠️  Invalid Chart.yaml (missing name or version) — skipping $dir"
+                continue
+              fi
+
+              CHART_PACKAGE="${CHART_NAME}-${CHART_VERSION}.tgz"
+
+              echo "📦 Packaging Helm chart: $CHART_NAME ($CHART_VERSION)"
+              helm package "$dir"
+
+              echo "📤 Pushing to ACR: oci://${acrLoginServer}/helm/$CHART_NAME:$CHART_VERSION"
+              helm push "$CHART_PACKAGE" "oci://${acrLoginServer}/helm"
+
+              rm -f "$CHART_PACKAGE"
+            done
+          displayName: 'Package and Push Helm Charts to ACR'

@@ -1,0 +1,32 @@
+trigger:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  chartPath: 'charts/mychart'  # Path to your Helm chart directory
+  acrName: 'myACR.azurecr.io'  # Replace with your ACR name
+  serviceName: 'my-service'    # Replace with your service name
+  version: '1.0.0'             # Chart version
+
+steps:
+- checkout: self
+- task: HelmInstaller@1
+  inputs:
+    helmVersionToInstall: '3.x'
+
+- script: |
+    helm package $(chartPath) --version $(version)
+  displayName: 'Package Helm Chart'
+
+- script: |
+    az acr helm repo add --name $(acrName)
+    helm push $(serviceName)-$(version).tgz oci://$(acrName)
+  env:
+    HELM_EXPERIMENTAL_OCI: 1
+  displayName: 'Push Helm Chart to ACR'
+
+- script: |
+    az acr repository list --name $(acrName) --output table
+  displayName: 'List ACR Repositories'
