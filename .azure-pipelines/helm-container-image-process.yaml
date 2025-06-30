@@ -130,19 +130,23 @@ stages:
             export HELM_EXPERIMENTAL_OCI=1
             acrLoginServer="$(acrLoginServer)"
 
-            echo "📦 Locating Helm charts in root folders..."
+            echo "Locating Helm charts in root folders..."
 
+            #Find all chart directories at the repo root
             CHART_DIRS=$(find . -maxdepth 2 -type f -name "Chart.yaml" -exec dirname {} \; | grep -vE '^\./\.|^\.$' | sort -u)
 
             if [ -z "$CHART_DIRS" ]; then
-              echo "⚠️ No chart folders with Chart.yaml found — skipping helm push"
+              echo "No chart folders with Chart.yaml found — skipping helm push"
               exit 0
             fi
 
             for dir in $CHART_DIRS; do
               CHART_FILE="$dir/Chart.yaml"
-              if [ ! -f "$CHART_FILE" ]; then
-                echo "⚠️  No Chart.yaml found — skipping $dir"
+              VALUES_FILE="$dir/values.yaml"
+              BACKUP_FILE="$VALUES_FILE.bak"
+
+              if [ ! -f "$CHART_FILE" ] || [ ! -f "$VALUES_FILE" ]; then
+                echo "Missing Chart.yaml or values.yaml — skipping $dir"
                 continue
               fi
 
@@ -150,18 +154,58 @@ stages:
               CHART_VERSION=$(yq '.version' "$CHART_FILE")
 
               if [[ -z "$CHART_NAME" || "$CHART_NAME" == "null" || -z "$CHART_VERSION" || "$CHART_VERSION" == "null" ]]; then
-                echo "⚠️  Invalid Chart.yaml (missing name or version) — skipping $dir"
+                echo "Invalid Chart.yaml (missing name or version) — skipping $dir"
                 continue
               fi
 
+              # Get current image repository + tag
+              ORIG_REPO=$(yq '.image.repository' "$VALUES_FILE")
+              IMAGE_TAG=$(yq '.image.tag' "$VALUES_FILE")
+
+              if [[ "$ORIG_REPO" == "null" || "$IMAGE_TAG" == "null" || -z "$ORIG_REPO" || -z "$IMAGE_TAG" ]]; then
+                echo "Cannot update image path — missing .image.repository or .image.tag in $VALUES_FILE"
+                continue
+              fi
+
+              # Conditionally rewrite repository ONLY if its not already pointing to your ACR
+              if [[ "$ORIG_REPO" != "$acrLoginServer"* ]]; then
+                NEW_REPO="$acrLoginServer/$(basename "$ORIG_REPO")"
+                echo "Rewriting image.repository to $NEW_REPO in $VALUES_FILE"
+                
+                # Backup original values.yaml
+                cp "$VALUES_FILE" "$BACKUP_FILE"
+
+                # Update values.yaml with ACR reference
+                yq -i ".image.repository = \"$NEW_REPO\"" "$VALUES_FILE"
+              else
+                echo "image.repository already points to ACR — no rewrite needed"
+              fi
+
+              # Lint chart
+              echo "Running helm lint on $dir"
+              helm lint "$dir" || {
+                echo "Helm lint failed — skipping $dir"
+                # Restore original file if modified
+                [ -f "$BACKUP_FILE" ] && mv "$BACKUP_FILE" "$VALUES_FILE"
+                continue
+              }
+
+              # Package and push
               CHART_PACKAGE="${CHART_NAME}-${CHART_VERSION}.tgz"
 
-              echo "📦 Packaging Helm chart: $CHART_NAME ($CHART_VERSION)"
+              echo "Packaging Helm chart: $CHART_NAME ($CHART_VERSION)"
               helm package "$dir"
 
-              echo "📤 Pushing to ACR: oci://${acrLoginServer}/helm/$CHART_NAME:$CHART_VERSION"
+              echo "Pushing chart to ACR: oci://${acrLoginServer}/helm/$CHART_NAME:$CHART_VERSION"
               helm push "$CHART_PACKAGE" "oci://${acrLoginServer}/helm"
 
+              # Cleanup
               rm -f "$CHART_PACKAGE"
+
+              # Restore original values.yaml if we modified it
+              if [ -f "$BACKUP_FILE" ]; then
+                echo "Restoring original values.yaml"
+                mv "$BACKUP_FILE" "$VALUES_FILE"
+              fi
             done
-          displayName: 'Package and Push Helm Charts to ACR'
+          displayName: 'Update Image Repo, Lint, Package, and Push Helm Charts to ACR'
