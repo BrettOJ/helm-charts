@@ -16,196 +16,194 @@ variables:
   acrServiceConnection: 'konjur-azure-container-registry-connection'
 
 stages:
-  - stage: PromoteImages
+  - stage: PromoteCharts
     jobs:
-     - job: Promote
-       steps:
-        - checkout: self
-          persistCredentials: true
-          fetchDepth: 0
+      - job: Promote
+        steps:
 
-        - task: DockerInstaller@0
-          inputs:
-            dockerVersion: '28.3.0'
+          # ---------------------------------------
+          # Checkout and install required tools
+          # ---------------------------------------
+          - checkout: self
+            persistCredentials: true
+            fetchDepth: 0
 
-        - script: |
-            sudo wget https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz -O helm.tar.gz
-            tar -zxvf helm.tar.gz
-            sudo mv linux-amd64/helm /usr/local/bin/helm
-            helm version
-          displayName: 'Install Helm CLI'
+          - task: DockerInstaller@0
+            inputs:
+              dockerVersion: '28.3.0'
 
-        - script: |
-            sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
-            sudo chmod +x /usr/bin/yq
-          displayName: 'Install yq'
+          - script: |
+              curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+            displayName: 'Install Azure CLI'
 
-        - task: Docker@2
-          displayName: 'Login to ACR'
-          inputs:
-            command: login
-            containerRegistry: $(acrServiceConnection)
+          - script: |
+              sudo wget https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz -O helm.tar.gz
+              tar -zxvf helm.tar.gz
+              sudo mv linux-amd64/helm /usr/local/bin/helm
+              helm version
+            displayName: 'Install Helm CLI'
 
-        - script: |
-                set -e
+          - script: |
+              sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+              sudo chmod +x /usr/bin/yq
+              yq --version
+            displayName: 'Install yq'
 
-                acrLoginServer="$(acrLoginServer)"
+          # ---------------------------------------
+          # Login to ACR
+          # ---------------------------------------
+          - task: Docker@2
+            displayName: 'Login to ACR'
+            inputs:
+              command: login
+              containerRegistry: $(acrServiceConnection)
 
-                #Function to auto-detect image info
-                detect_image_info() {
-                  local values_file="$1"
-                  local repo tag full nested
+          # ---------------------------------------
+          # Detect new promotable charts
+          # ---------------------------------------
+          - script: |
+              set -e
 
-                  repo=$(yq '.image.repository' "$values_file")
-                  tag=$(yq '.image.tag' "$values_file")
-                  if [[ "$repo" != "null" && "$tag" != "null" && -n "$repo" && -n "$tag" ]]; then
-                    echo "format=split"
-                    echo "image=$repo:$tag"
-                    return 0
+              echo "🔍 Detecting newly added chart folders..."
+
+              if [ -n "$SYSTEM_PULLREQUEST_TARGETBRANCH" ]; then
+                git fetch origin $SYSTEM_PULLREQUEST_TARGETBRANCH
+                RANGE="origin/$SYSTEM_PULLREQUEST_TARGETBRANCH...HEAD"
+              else
+                RANGE="$(git rev-parse HEAD^)...HEAD"
+              fi
+
+              ADDED_DIRS=$(git diff --name-status $RANGE | awk '$1 == "A" {print $2}' | awk -F/ '{print $1}' | sort -u | uniq)
+
+              if [ -z "$ADDED_DIRS" ]; then
+                echo "✅ No new folders found — nothing to do."
+                exit 0
+              fi
+
+              PROMOTABLE_CHARTS=""
+              for folder in $ADDED_DIRS; do
+                VALUES_FILE="$folder/values.yaml"
+                if [ -f "$VALUES_FILE" ]; then
+                  REPO=$(yq '.image.repository' "$VALUES_FILE")
+                  if [[ "$REPO" != "$(acrLoginServer)"* ]]; then
+                    PROMOTABLE_CHARTS="$PROMOTABLE_CHARTS $folder"
+                  else
+                    echo "✅ $folder already uses ACR image — skipping"
                   fi
+                fi
+              done
 
-                  full=$(yq '.image' "$values_file")
-                  if [[ "$full" != "null" && "$full" == *":"* ]]; then
-                    echo "format=full"
-                    echo "image=$full"
-                    return 0
-                  fi
-
-                  nested=$(yq '.containers[0].image' "$values_file")
-                  if [[ "$nested" != "null" && "$nested" == *":"* ]]; then
-                    echo "format=full"
-                    echo "image=$nested"
-                    return 0
-                  fi
-
-                  return 1
-                }
-
-                echo "Locating all chart folders in /charts"
-
-                # Get all chart folders that contain a values.yaml
-                CHART_DIRS=$(find . -maxdepth 2 -type f -name "values.yaml" -exec dirname {} \; | grep -vE '^\./\.|^\.$' | sort -u)
-
-
-                if [ -z "$CHART_DIRS" ]; then
-                  echo "No Helm chart folders with values.yaml found."
-                  exit 1
+                if [ -z "$PROMOTABLE_CHARTS" ]; then
+                  echo "✅ No charts require promotion."
+                  touch promotable-charts.txt
+                else
+                  echo "$PROMOTABLE_CHARTS" | xargs -n1 > promotable-charts.txt
                 fi
 
-                echo "Found chart directories:"
-                echo "$CHART_DIRS"
+                echo "📋 Charts to promote:"
+                cat promotable-charts.txt
+             
+            displayName: 'Detect Promotable Chart Folders'
 
-                for dir in $CHART_DIRS; do
-                  echo "Processing chart: $dir"
+          # ---------------------------------------
+          # Process each chart
+          # ---------------------------------------
+          - script: |
+              set -e
+              export HELM_EXPERIMENTAL_OCI=1
 
-                  VALUES_FILE="$dir/values.yaml"
-                  if [ ! -f "$VALUES_FILE" ]; then
-                    echo "No values.yaml found — skipping"
-                    continue
-                  fi
+              acr="$(acrLoginServer)"
 
-                  eval $(detect_image_info "$VALUES_FILE" || echo "format=unknown image=")
+              # Exit early if no charts to promote
+                if [ ! -s promotable-charts.txt ]; then
+                  echo "✅ No charts to promote — exiting step."
+                  exit 0
+                fi
 
-                  if [ "$format" = "unknown" ] || [ -z "$image" ]; then
-                    echo "No valid image found in $VALUES_FILE — skipping"
-                    continue
-                  fi
+              for dir in $(cat promotable-charts.txt); do
+                echo "🔄 Processing: $dir"
 
-                  REPO_NAME=$(basename $(echo "$image" | cut -d: -f1))
-                  TAG=$(echo "$image" | cut -d: -f2)
-                  ACR_IMAGE="$acrLoginServer/$REPO_NAME:$TAG"
+                CHART="$dir/Chart.yaml"
+                VALUES="$dir/values.yaml"
+                [ -f "$CHART" ] || { echo "⚠️ No Chart.yaml in $dir — skipping"; continue; }
+                [ -f "$VALUES" ] || { echo "⚠️ No values.yaml in $dir — skipping"; continue; }
 
-                  echo "Pulling image: $image"
-                  docker pull "$image"
+                NAME=$(yq '.name' "$CHART")
+                VERSION=$(yq '.version' "$CHART")
+                IMAGE_REPO=$(yq '.image.repository' "$VALUES")
+                IMAGE_TAG=$(yq '.image.tag' "$VALUES")
+                ACR_IMAGE="$acr/$(basename "$IMAGE_REPO"):$IMAGE_TAG"
 
-                  echo "Tagging as: $ACR_IMAGE"
-                  docker tag "$image" "$ACR_IMAGE"
+                if [[ -z "$NAME" || -z "$VERSION" || -z "$IMAGE_REPO" || -z "$IMAGE_TAG" ]]; then
+                  echo "⚠️ Missing values — skipping $dir"
+                  continue
+                fi
 
-                  echo "Pushing to ACR"
-                  docker push "$ACR_IMAGE"
-                done
-          displayName: 'Find and Promote All Helm Chart Images'
-        - script: |
-            set -e
-            export HELM_EXPERIMENTAL_OCI=1
-            acrLoginServer="$(acrLoginServer)"
+                echo "🐳 Pulling image: $IMAGE_REPO:$IMAGE_TAG"
+                docker pull "$IMAGE_REPO:$IMAGE_TAG"
 
-            echo "Locating Helm charts in root folders..."
+                echo "🔁 Tagging: $ACR_IMAGE"
+                docker tag "$IMAGE_REPO:$IMAGE_TAG" "$ACR_IMAGE"
 
-            #Find all chart directories at the repo root
-            CHART_DIRS=$(find . -maxdepth 2 -type f -name "Chart.yaml" -exec dirname {} \; | grep -vE '^\./\.|^\.$' | sort -u)
+                echo "📤 Pushing to ACR..."
+                docker push "$ACR_IMAGE"
 
-            if [ -z "$CHART_DIRS" ]; then
-              echo "No chart folders with Chart.yaml found — skipping helm push"
-              exit 0
-            fi
+                echo "🛠️ Rewriting values.yaml to use ACR image"
+                cp "$VALUES" "$VALUES.bak"
+                yq -i ".image.repository = \"$acr/$(basename "$IMAGE_REPO")\"" "$VALUES"
 
-            for dir in $CHART_DIRS; do
-              CHART_FILE="$dir/Chart.yaml"
-              VALUES_FILE="$dir/values.yaml"
-              BACKUP_FILE="$VALUES_FILE.bak"
+                echo "🔍 Linting chart..."
+                helm lint "$dir" || {
+                  echo "❌ Helm lint failed — skipping $dir"
+                  mv "$VALUES.bak" "$VALUES"
+                  continue
+                }
 
-              if [ ! -f "$CHART_FILE" ] || [ ! -f "$VALUES_FILE" ]; then
-                echo "Missing Chart.yaml or values.yaml — skipping $dir"
-                continue
-              fi
+                echo "📦 Packaging chart..."
+                helm package "$dir"
 
-              CHART_NAME=$(yq '.name' "$CHART_FILE")
-              CHART_VERSION=$(yq '.version' "$CHART_FILE")
+                echo "📤 Pushing Helm chart to ACR"
+                helm push "${NAME}-${VERSION}.tgz" "oci://$acr/helm"
+                rm -f "${NAME}-${VERSION}.tgz"
 
-              if [[ -z "$CHART_NAME" || "$CHART_NAME" == "null" || -z "$CHART_VERSION" || "$CHART_VERSION" == "null" ]]; then
-                echo "Invalid Chart.yaml (missing name or version) — skipping $dir"
-                continue
-              fi
+                echo "🔀 Creating Git branch for $NAME"
+                BRANCH="promoted/$NAME"
+                git config user.name "Azure DevOps Bot"
+                git config user.email "azdo-bot@contoso.com"
+                git checkout -b "$BRANCH"
+                git add "$VALUES"
+                git commit -m "Promote $NAME: point image to ACR"
+                git push origin "$BRANCH" --force
 
-              # Get current image repository + tag
-              ORIG_REPO=$(yq '.image.repository' "$VALUES_FILE")
-              IMAGE_TAG=$(yq '.image.tag' "$VALUES_FILE")
+                echo "📬 Creating PR if not exists..."
+                az extension add --name azure-devops --only-show-errors
+                export AZURE_DEVOPS_EXT_PAT="$SYSTEM_ACCESSTOKEN"
+                az devops configure --defaults organization="$(System.CollectionUri)" project="$(System.TeamProject)"
 
-              if [[ "$ORIG_REPO" == "null" || "$IMAGE_TAG" == "null" || -z "$ORIG_REPO" || -z "$IMAGE_TAG" ]]; then
-                echo "Cannot update image path — missing .image.repository or .image.tag in $VALUES_FILE"
-                continue
-              fi
+                PR_EXISTS=$(az repos pr list \
+                  --repository "$(Build.Repository.Name)" \
+                  --source-branch "$BRANCH" \
+                  --target-branch "main" \
+                  --status active \
+                  --query "[0].pullRequestId" \
+                  --output tsv)
 
-              # Conditionally rewrite repository ONLY if its not already pointing to your ACR
-              if [[ "$ORIG_REPO" != "$acrLoginServer"* ]]; then
-                NEW_REPO="$acrLoginServer/$(basename "$ORIG_REPO")"
-                echo "Rewriting image.repository to $NEW_REPO in $VALUES_FILE"
-                
-                # Backup original values.yaml
-                cp "$VALUES_FILE" "$BACKUP_FILE"
+                if [ -z "$PR_EXISTS" ]; then
+                  az repos pr create \
+                    --repository "$(Build.Repository.Name)" \
+                    --source-branch "$BRANCH" \
+                    --target-branch "main" \
+                    --title "[Promotion] $NAME chart image uses ACR" \
+                    --description "Rewrites \`values.yaml\` to use \`$ACR_IMAGE\` and publishes Helm chart to ACR." \
+                    --auto-complete true \
+                    --squash
+                else
+                  echo "✅ PR already exists for $BRANCH"
+                fi
 
-                # Update values.yaml with ACR reference
-                yq -i ".image.repository = \"$NEW_REPO\"" "$VALUES_FILE"
-              else
-                echo "image.repository already points to ACR — no rewrite needed"
-              fi
-
-              # Lint chart
-              echo "Running helm lint on $dir"
-              helm lint "$dir" || {
-                echo "Helm lint failed — skipping $dir"
-                # Restore original file if modified
-                [ -f "$BACKUP_FILE" ] && mv "$BACKUP_FILE" "$VALUES_FILE"
-                continue
-              }
-
-              # Package and push
-              CHART_PACKAGE="${CHART_NAME}-${CHART_VERSION}.tgz"
-
-              echo "Packaging Helm chart: $CHART_NAME ($CHART_VERSION)"
-              helm package "$dir"
-
-              echo "Pushing chart to ACR: oci://${acrLoginServer}/helm/$CHART_NAME:$CHART_VERSION"
-              helm push "$CHART_PACKAGE" "oci://${acrLoginServer}/helm"
-
-              # Cleanup
-              rm -f "$CHART_PACKAGE"
-
-              # Restore original values.yaml if we modified it
-              if [ -f "$BACKUP_FILE" ]; then
-                echo "Restoring original values.yaml"
-                mv "$BACKUP_FILE" "$VALUES_FILE"
-              fi
-            done
-          displayName: 'Update Image Repo, Lint, Package, and Push Helm Charts to ACR'
+                echo "🧹 Restoring original values.yaml"
+                mv "$VALUES.bak" "$VALUES"
+              done
+            displayName: 'Promote Images and Charts'
+            env:
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
